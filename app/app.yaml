@@ -1,0 +1,17 @@
+command:
+  - "python"
+  - "app.py"
+
+env:
+  - name: USE_MOCK_BACKEND
+    value: "false"
+  - name: DATABRICKS_WAREHOUSE_ID
+    valueFrom: "warehouse-id"
+  - name: DATABRICKS_CATALOG
+    value: "algatty_manchester_usr_gp"
+  - name: DATABRICKS_SCHEMA
+    value: "default"
+
+resources:
+  - name: warehouse-id
+    type: sql_warehouse

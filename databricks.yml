@@ -1,0 +1,32 @@
+bundle:
+  name: mancity-footballhub
+
+include:
+  - resources/*.yml
+
+variables:
+  catalog:
+    default: "algatty_manchester_usr_gp"
+  schema:
+    default: "default"
+  warehouse_id:
+    lookup:
+      warehouse: "Shared Endpoint"
+
+targets:
+  dev:
+    default: true
+    mode: development
+    workspace:
+      profile: gokul.pillai
+    variables:
+      catalog: "algatty_manchester_usr_gp"
+      schema: "default"
+
+  prod:
+    mode: production
+    workspace:
+      profile: gokul.pillai
+    variables:
+      catalog: "algatty_manchester_usr_gp"
+      schema: "default"

@@ -1,0 +1,6 @@
+resources:
+  apps:
+    fan_intelligence_hub:
+      name: mancity-fan-hub-${bundle.target}
+      description: "Man City Fan Intelligence Hub — matchday analytics, demographics, ticketing, and operational insights"
+      source_code_path: ../app
