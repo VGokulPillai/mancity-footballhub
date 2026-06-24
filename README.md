@@ -1,34 +1,38 @@
 # Man City Fan Intelligence Hub
 
-A comprehensive matchday analytics dashboard for Manchester City FC, built on **Databricks** with **Dash** and deployable via **Databricks Asset Bundles (DABs)**.
+A pixel-accurate replica of the Power BI Fan Intelligence Hub matchday dashboard, rebuilt as a **Databricks App** with **Dash + Plotly** and packaged as a **Databricks Asset Bundle (DABs)** for one-command deployment.
+
+![Fan Intelligence Hub](app/assets/etihad-stadium.png)
+
+---
 
 ## Architecture
 
 ```
 mancity-footballhub/
-├── databricks.yml              # DABs main config (multi-env targets)
+├── databricks.yml                    # DABs config (dev + prod targets)
 ├── resources/
-│   └── fan_intelligence_hub.app.yml  # App resource definition
+│   └── fan_intelligence_hub.app.yml  # Databricks App resource definition
 ├── app/
-│   ├── app.py                  # Dash application (main entry point)
-│   ├── backend.py              # Data access layer (mock + real backends)
-│   ├── models.py               # Pydantic models for all 17 tables
-│   ├── app.yaml                # Databricks Apps runtime config
-│   ├── requirements.txt        # Python dependencies
-│   └── assets/                 # Static images (crest, logos, stadium)
-└── sql/                        # SQL reference files
+│   ├── app.py                        # Dash application (pixel-match UI)
+│   ├── backend.py                    # Data layer (mock + real backends)
+│   ├── models.py                     # Pydantic models for all 17 tables
+│   ├── app.yaml                      # Databricks Apps runtime config
+│   ├── requirements.txt              # Python dependencies
+│   └── assets/                       # Man City crest, Databricks logo, stadium
+└── README.md
 ```
 
-## Data Tables
+---
 
-The app reads from **17 Unity Catalog tables**:
+## Data Tables (17 Unity Catalog tables)
 
 | Table | Type | Description |
 |-------|------|-------------|
-| `out_dim_fans` | Dimension | Fan demographics, location, membership |
-| `out_dim_fixtures` | Dimension | Match schedule, results, venues |
+| `out_dim_fans` | Dimension | Fan demographics, location, age bands, membership |
+| `out_dim_fixtures` | Dimension | Match schedule, competitions, results, venues |
 | `out_dim_retail_products` | Dimension | Product catalog for merchandise |
-| `out_dim_tour_events` | Dimension | Stadium tour events |
+| `out_dim_tour_events` | Dimension | Stadium tour event listings |
 | `out_fact_ticketing_transactions` | Fact | Ticket sales, pricing, seat allocation |
 | `out_fact_engagements` | Fact | Fan engagement across channels |
 | `out_fact_engagement_group` | Fact | Engagement group summaries |
@@ -43,95 +47,182 @@ The app reads from **17 Unity Catalog tables**:
 | `work_surrogate_id_table` | Work | Surrogate key mapping |
 | `work_transtable_reduced` | Work | Reduced transaction staging |
 
+---
+
 ## Dashboard Pages
 
-- **Home** — Overview with navigation cards to all sections
-- **Matchday** — Attendance KPIs, age/distance/gender demographics, one-off ticket analysis
-- **Zendesk** — Support ticket analytics and satisfaction metrics
-- **Merchandise** — Retail revenue, basket size, top categories
-- **Facilities KPIs** — Capacity utilization, dwell time, F&B revenue
-- **Product** — Membership, engagement, and stadium tour analytics
-- **Data Tables** — View all 17 tables and their connection status
+| Page | Description |
+|------|-------------|
+| **Matchday** | KPIs (attenders, attendance %, tickets sold, revenue, unique buyers) + age/distance/gender/outside UK/one-off ticket charts with full filter panel |
+| **Zendesk** | Support ticket analytics by category with resolution and satisfaction |
+| **Merchandise** | Retail revenue, basket size, top product categories |
+| **Facilities KPIs** | Capacity utilization, dwell time, F&B revenue |
+| **Product** | Membership, engagement, and stadium tour analytics |
+| **Data Tables** | View all 17 Unity Catalog tables and their connection status |
 
-## Quick Start (Local Development)
+---
+
+## Quick Start — Local Development
 
 ```bash
 cd app
 pip install -r requirements.txt
-# Mock backend is enabled by default
 python app.py
-# Open http://localhost:8080
+# Opens at http://localhost:8080 with mock data
 ```
+
+Mock mode is enabled by default (`USE_MOCK_BACKEND=true`) so the app runs without any Databricks connection. The mock data matches the exact values from the Power BI dashboard screenshot.
+
+---
 
 ## Configuration
 
-Set these environment variables (or configure in `app.yaml`):
+Set these in `app/app.yaml` (for Databricks deployment) or as environment variables (for local):
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `USE_MOCK_BACKEND` | `true` | Set to `false` to query real Databricks tables |
-| `DATABRICKS_CATALOG` | `algatty_manchester_usr_gp` | Unity Catalog name |
+| `DATABRICKS_CATALOG` | `algatty_manchester_usr_gp` | Unity Catalog name containing the tables |
 | `DATABRICKS_SCHEMA` | `default` | Schema containing the tables |
-| `DATABRICKS_WAREHOUSE_ID` | *(required for real backend)* | SQL Warehouse ID |
+| `DATABRICKS_WAREHOUSE_ID` | *(from app resource)* | SQL Warehouse ID for query execution |
+
+---
 
 ## Deploy to Databricks
 
 ### Prerequisites
 
-1. [Databricks CLI](https://docs.databricks.com/dev-tools/cli/install) v0.239.0+
-2. Authenticated profile: `databricks auth login --host <workspace-url> --profile <profile>`
-3. SQL Warehouse with access to the Unity Catalog tables
+1. **Databricks CLI** v0.239.0 or later — [install guide](https://docs.databricks.com/dev-tools/cli/install)
+2. **Authenticated profile** — run `databricks auth login` for your workspace
+3. **SQL Warehouse** — with access to the Unity Catalog tables above
+4. **Tables loaded** — all 17 `out_*` and `work_*` tables must exist in the target catalog/schema
 
-### Deploy with DABs
+### Step-by-step deployment
 
 ```bash
-# Validate the bundle
+# 1. Clone the repo
+git clone https://github.com/VGokulPillai/mancity-footballhub.git
+cd mancity-footballhub
+
+# 2. Authenticate to your Databricks workspace
+databricks auth login --host https://<your-workspace>.azuredatabricks.net --profile my-workspace
+
+# 3. Update databricks.yml with your profile and catalog/schema
+#    Edit targets → prod → workspace → profile
+#    Edit targets → prod → variables → catalog / schema
+
+# 4. Update app/app.yaml with your catalog, schema, and warehouse
+#    Edit env → DATABRICKS_CATALOG → value
+#    Edit env → DATABRICKS_SCHEMA → value
+#    Set USE_MOCK_BACKEND → "false"
+
+# 5. Validate the bundle
 databricks bundle validate
 
-# Deploy to dev
+# 6. Deploy
+databricks bundle deploy -t prod
+
+# 7. Start the app
+databricks bundle run fan_intelligence_hub -t prod
+
+# 8. Check logs if needed
+databricks apps logs mancity-fan-hub-prod --profile my-workspace
+```
+
+### Quick deploy (dev mode)
+
+```bash
+# Uses the default dev target with your local profile
 databricks bundle deploy
+databricks bundle run fan_intelligence_hub
+```
+
+---
+
+## Client Deployment Guide
+
+To deploy this to a **different Databricks workspace** (e.g. for a client):
+
+### 1. Update `databricks.yml`
+
+```yaml
+targets:
+  prod:
+    mode: production
+    workspace:
+      profile: client-workspace    # <- client's Databricks CLI profile
+    variables:
+      catalog: "client_catalog"    # <- their Unity Catalog name
+      schema: "client_schema"      # <- their schema name
+```
+
+### 2. Update `app/app.yaml`
+
+```yaml
+env:
+  - name: USE_MOCK_BACKEND
+    value: "false"                 # <- connect to real tables
+  - name: DATABRICKS_CATALOG
+    value: "client_catalog"        # <- match databricks.yml
+  - name: DATABRICKS_SCHEMA
+    value: "client_schema"         # <- match databricks.yml
+```
+
+### 3. Authenticate and deploy
+
+```bash
+# Authenticate to client workspace
+databricks auth login --host https://<client-workspace>.azuredatabricks.net --profile client-workspace
+
+# Validate
+databricks bundle validate -t prod
+
+# Deploy
+databricks bundle deploy -t prod
 
 # Start the app
-databricks bundle run fan_intelligence_hub
-
-# Deploy to production
-databricks bundle deploy -t prod
 databricks bundle run fan_intelligence_hub -t prod
 ```
 
-### Client Deployment
+### 4. Verify
 
-To deploy to a **different workspace** (e.g., for your client):
+```bash
+# Check deployment logs
+databricks apps logs mancity-fan-hub-prod --profile client-workspace
 
-1. **Update `databricks.yml`** — change the workspace profile and variable values:
-   ```yaml
-   targets:
-     prod:
-       workspace:
-         profile: client-workspace-profile
-       variables:
-         catalog: "client_catalog_name"
-         schema: "client_schema_name"
-   ```
+# The app URL will be:
+# https://mancity-fan-hub-prod-<workspace-id>.azuredatabricksapps.com
+```
 
-2. **Update `app/app.yaml`** — set the correct catalog and schema:
-   ```yaml
-   env:
-     - name: DATABRICKS_CATALOG
-       value: "client_catalog_name"
-     - name: DATABRICKS_SCHEMA
-       value: "client_schema_name"
-   ```
+---
 
-3. **Authenticate and deploy**:
-   ```bash
-   databricks auth login --host <client-workspace-url> --profile client-workspace-profile
-   databricks bundle deploy -t prod
-   databricks bundle run fan_intelligence_hub -t prod
-   ```
+## Table Requirements
+
+For the real backend to work, the client workspace must have:
+
+1. A **Unity Catalog** with all 17 tables (matching the names in the Data Tables section)
+2. A running **SQL Warehouse** (serverless recommended)
+3. The warehouse's **service principal** must have `SELECT` on all tables
+4. Add the warehouse as an app resource in the Databricks UI after deployment
+
+---
 
 ## Cleanup
 
 ```bash
+# Remove dev deployment
 databricks bundle destroy -t dev
+
+# Remove prod deployment
+databricks bundle destroy -t prod --auto-approve
 ```
+
+---
+
+## Technology Stack
+
+- **Frontend**: Dash 2.x + Plotly + dash-bootstrap-components (Darkly theme)
+- **Backend**: Python with mock/real toggle pattern
+- **Data**: Databricks Unity Catalog via SQL Warehouse
+- **Deployment**: Databricks Asset Bundles (DABs)
+- **Auth**: Databricks SDK `Config()` auto-detection (service principal)
