@@ -1,17 +1,19 @@
-"""Data access layer for the Man City Fan Intelligence Hub.
+"""Data access layer for the Man City Ticketing Intelligence Platform.
 
-Supports two modes:
-  - Mock backend: returns realistic synthetic data for local development
-  - Real backend: queries Databricks SQL warehouse via Unity Catalog
+Two modes:
+  - Mock: realistic synthetic data matching real Power BI numbers
+  - Real: queries Databricks SQL warehouse via Unity Catalog
 """
 
 import os
 import random
+import math
 from datetime import date, timedelta
 from abc import ABC, abstractmethod
 from typing import Any
 
 import pandas as pd
+import numpy as np
 
 CATALOG = os.getenv("DATABRICKS_CATALOG", "algatty_manchester_usr_gp")
 SCHEMA = os.getenv("DATABRICKS_SCHEMA", "default")
@@ -19,170 +21,191 @@ WAREHOUSE_ID = os.getenv("DATABRICKS_WAREHOUSE_ID", "")
 USE_MOCK = os.getenv("USE_MOCK_BACKEND", "true").lower() == "true"
 
 ALL_TABLES = [
-    "out_dim_fans",
-    "out_dim_fixtures",
-    "out_dim_retail_products",
-    "out_dim_tour_events",
-    "out_fact_cityplus_transactions",
-    "out_fact_engagement_group",
-    "out_fact_engagements",
-    "out_fact_membership_transactions",
-    "out_fact_retail_discounts",
-    "out_fact_retail_transactions",
-    "out_fact_ticketing_transactions",
-    "out_fact_tour_transactions",
-    "out_fact_zendesk_category",
-    "out_fact_zendesk_tickets",
-    "work_membership_id_table",
-    "work_surrogate_id_table",
-    "work_transtable_reduced",
+    "out_dim_fans", "out_dim_fixtures", "out_dim_retail_products",
+    "out_dim_tour_events", "out_fact_cityplus_transactions",
+    "out_fact_engagement_group", "out_fact_engagements",
+    "out_fact_membership_transactions", "out_fact_retail_discounts",
+    "out_fact_retail_transactions", "out_fact_ticketing_transactions",
+    "out_fact_tour_transactions", "out_fact_zendesk_category",
+    "out_fact_zendesk_tickets", "work_membership_id_table",
+    "work_surrogate_id_table", "work_transtable_reduced",
+]
+
+FIXTURES_25_26 = [
+    ("Chelsea", "2025-08-17", "PL"), ("Ipswich Town", "2025-08-24", "PL"),
+    ("West Ham", "2025-08-31", "PL"), ("Brentford", "2025-09-14", "PL"),
+    ("Arsenal", "2025-09-21", "PL"), ("Newcastle", "2025-10-05", "PL"),
+    ("Wolves", "2025-10-19", "PL"), ("Southampton", "2025-10-26", "PL"),
+    ("Tottenham", "2025-11-02", "PL"), ("Brighton", "2025-11-23", "PL"),
+    ("Bournemouth", "2025-11-30", "PL"), ("Crystal Palace", "2025-12-07", "PL"),
+    ("Man United", "2025-12-14", "PL"), ("Everton", "2025-12-21", "PL"),
+    ("Leicester", "2025-12-26", "PL"), ("Nottm Forest", "2026-01-04", "PL"),
+    ("Liverpool", "2026-01-18", "PL"), ("Aston Villa", "2026-02-01", "PL"),
+    ("Fulham", "2026-02-15", "PL"), ("Slovan Bratislava", "2025-10-01", "UCL"),
+    ("Sparta Prague", "2025-11-05", "UCL"), ("Feyenoord", "2026-01-22", "UCL"),
+    ("Club Brugge", "2026-01-29", "UCL"), ("Salford City", "2025-09-25", "LC"),
+    ("Walsall", "2025-10-30", "LC"), ("Tottenham", "2025-12-19", "LC"),
+    ("Leeds United", "2026-01-11", "FA"), ("Leyton Orient", "2026-02-08", "FA"),
+]
+
+STADIUM_SECTIONS = [
+    "Colin Bell Stand Upper", "Colin Bell Stand Lower",
+    "East Stand Upper Tier 3", "East Stand Upper Tier 2", "East Stand Lower",
+    "South Stand Upper", "South Stand Lower",
+    "North Stand Upper", "North Stand Lower", "Family Stand",
+    "Hospitality 93:20", "Hospitality Tunnel Club", "Hospitality Directors",
 ]
 
 
 class BaseBackend(ABC):
     @abstractmethod
-    def query(self, sql: str) -> pd.DataFrame:
-        ...
-
+    def query(self, sql: str) -> pd.DataFrame: ...
     @abstractmethod
-    def list_tables(self) -> list[dict[str, Any]]:
-        ...
-
-    def get_matchday_kpis(self, season: str, event_date_start: str, event_date_end: str) -> dict:
-        ...
-
-    def get_attenders_age(self, season: str, event_date_start: str, event_date_end: str) -> pd.DataFrame:
-        ...
-
-    def get_attenders_distance(self, season: str, event_date_start: str, event_date_end: str) -> pd.DataFrame:
-        ...
-
-    def get_attenders_gender(self, season: str, event_date_start: str, event_date_end: str) -> pd.DataFrame:
-        ...
-
-    def get_attenders_outside_uk(self, season: str, event_date_start: str, event_date_end: str) -> pd.DataFrame:
-        ...
-
-    def get_one_off_ticket_attenders(self, season: str, event_date_start: str, event_date_end: str) -> dict:
-        ...
+    def list_tables(self) -> list[dict[str, Any]]: ...
 
 
 class MockBackend(BaseBackend):
-    """Returns realistic synthetic data for development/demo purposes."""
+    """Realistic synthetic data matching Power BI numbers."""
 
     def query(self, sql: str) -> pd.DataFrame:
         return pd.DataFrame()
 
     def list_tables(self) -> list[dict[str, Any]]:
-        return [
-            {"catalog": CATALOG, "schema": SCHEMA, "table": t, "status": "mock"}
-            for t in ALL_TABLES
-        ]
+        return [{"catalog": CATALOG, "schema": SCHEMA, "table": t, "status": "mock"} for t in ALL_TABLES]
 
-    def get_matchday_kpis(self, season="25/26", event_date_start="2025-08-01", event_date_end="2026-06-30") -> dict:
+    # ── Core KPIs ──
+    def get_ticketing_kpis(self, season="25/26") -> dict:
         return {
-            "attenders": 1_277_120,
-            "attendance_pct": 86.8,
-            "tickets_sold": 1_470_678,
-            "ticketing_revenue": 69_475_212,
-            "unique_buyers": 102_460,
+            "total_revenue": 69_475_212, "tickets_sold": 1_470_678,
+            "unique_buyers": 102_460, "attenders": 1_277_120,
+            "attendance_pct": 86.8, "avg_ticket_price": 47.24,
+            "season_ticket_holders": 38_260, "first_timers_pct": 6.7,
+            "sell_through_pct": 94.2, "matches_played": 28,
+            "revenue_per_match": 2_481_258, "digital_sales_pct": 72.4,
         }
 
-    def get_attenders_age(self, season="25/26", event_date_start="2025-08-01", event_date_end="2026-06-30") -> pd.DataFrame:
+    # ── Revenue by match ──
+    def get_revenue_by_match(self, season="25/26") -> pd.DataFrame:
+        random.seed(42)
+        rows = []
+        for away, dt, comp in FIXTURES_25_26:
+            base = 2_200_000 if comp == "PL" else (2_800_000 if comp == "UCL" else 900_000)
+            if away in ("Arsenal", "Liverpool", "Man United", "Tottenham"):
+                base = int(base * 1.35)
+            rev = base + random.randint(-300_000, 400_000)
+            att = random.randint(48_000, 53_400) if comp in ("PL", "UCL") else random.randint(32_000, 45_000)
+            sold = att + random.randint(500, 3000)
+            rows.append({
+                "match": f"vs {away}", "date": dt, "competition": comp,
+                "revenue": rev, "tickets_sold": sold, "attendance": att,
+                "sell_through": round(att / 53_400 * 100, 1),
+                "avg_price": round(rev / max(sold, 1), 2),
+            })
+        return pd.DataFrame(rows)
+
+    # ── Pricing distribution ──
+    def get_price_distribution(self, season="25/26") -> pd.DataFrame:
+        return pd.DataFrame({
+            "price_band": ["<£20", "£20-35", "£35-50", "£50-75", "£75-100", "£100+"],
+            "count": [42_300, 185_600, 412_800, 508_200, 218_400, 103_378],
+            "revenue": [634_500, 5_567_400, 16_512_000, 30_492_000, 17_472_000, 12_405_360],
+        })
+
+    # ── Seat section heatmap ──
+    def get_section_occupancy(self, season="25/26") -> pd.DataFrame:
+        random.seed(7)
+        return pd.DataFrame({
+            "section": STADIUM_SECTIONS,
+            "capacity": [6200, 5800, 4200, 4800, 5400, 4600, 5200, 4000, 4400, 3800, 800, 400, 200],
+            "avg_occupancy_pct": [round(random.uniform(82, 99), 1) for _ in STADIUM_SECTIONS],
+            "avg_revenue": [round(random.uniform(180_000, 520_000)) for _ in STADIUM_SECTIONS],
+            "season_ticket_pct": [round(random.uniform(55, 92), 1) for _ in STADIUM_SECTIONS],
+        })
+
+    # ── Fan demographics ──
+    def get_attenders_age(self, season="25/26") -> pd.DataFrame:
         return pd.DataFrame({
             "age_band": ["17 and Under", "18-24", "25-34", "35-44", "45-54", "55-64", "65 and Over"],
             "percentage": [8, 11, 18, 18, 14, 14, 21],
         })
 
-    def get_attenders_distance(self, season="25/26", event_date_start="2025-08-01", event_date_end="2026-06-30") -> pd.DataFrame:
+    def get_attenders_distance(self, season="25/26") -> pd.DataFrame:
         return pd.DataFrame({
             "distance_band": ["0-10", "11-25", "26-50", "51-100", "Over 100"],
             "percentage": [53, 14, 10, 8, 17],
         })
 
-    def get_attenders_gender(self, season="25/26", event_date_start="2025-08-01", event_date_end="2026-06-30") -> pd.DataFrame:
+    def get_attenders_gender(self, season="25/26") -> pd.DataFrame:
+        return pd.DataFrame({"gender": ["Male", "Female"], "percentage": [83, 17]})
+
+    def get_attenders_country(self, season="25/26") -> pd.DataFrame:
         return pd.DataFrame({
-            "gender": ["Male", "Female"],
-            "percentage": [83, 17],
+            "country": ["Netherlands", "Ireland", "United States", "Italy", "Turkey",
+                         "Germany", "Norway", "Spain", "France", "Japan"],
+            "percentage": [18, 17, 10, 4, 4, 3, 3, 2, 2, 1],
         })
 
-    def get_attenders_outside_uk(self, season="25/26", event_date_start="2025-08-01", event_date_end="2026-06-30") -> pd.DataFrame:
+    # ── Buyer segments ──
+    def get_buyer_segments(self, season="25/26") -> pd.DataFrame:
         return pd.DataFrame({
-            "country": ["Netherlands", "Ireland", "United States", "Italy", "Turkey"],
-            "percentage": [18, 17, 10, 4, 4],
+            "segment": ["Season Ticket", "Loyalty Members", "Regular (5+ matches)",
+                         "Occasional (2-4)", "One-Off", "First Timer"],
+            "fans": [38_260, 24_800, 18_400, 12_600, 7_200, 1_200],
+            "avg_spend": [1450, 680, 420, 185, 52, 47],
+            "retention_pct": [94.2, 82.5, 68.0, 41.2, 18.5, 0],
         })
 
-    def get_one_off_ticket_attenders(self, season="25/26", event_date_start="2025-08-01", event_date_end="2026-06-30") -> dict:
-        return {
-            "total": 664_200,
-            "max_range": 1_300_000,
-            "first_timer_pct": 6.7,
-            "avg_ticket_cost": 47,
-        }
+    # ── Revenue trend (monthly) ──
+    def get_revenue_trend(self, season="25/26") -> pd.DataFrame:
+        months = ["Aug", "Sep", "Oct", "Nov", "Dec", "Jan", "Feb", "Mar", "Apr", "May"]
+        random.seed(99)
+        rev = [4_200_000, 5_800_000, 7_100_000, 6_400_000, 8_900_000,
+               7_200_000, 6_800_000, 7_500_000, 8_100_000, 7_400_000]
+        tix = [82_000, 112_000, 148_000, 128_000, 172_000, 142_000, 136_000, 152_000, 168_000, 130_000]
+        return pd.DataFrame({"month": months, "revenue": rev, "tickets": tix})
 
-    def get_fixtures(self, season="25/26") -> pd.DataFrame:
+    # ── Sale channel breakdown ──
+    def get_sale_channels(self, season="25/26") -> pd.DataFrame:
         return pd.DataFrame({
-            "fixture_id": [f"FIX-{i}" for i in range(1, 20)],
-            "season": ["25/26"] * 19,
-            "competition": ["Premier League"] * 19,
-            "match_date": [date(2025, 8, 17) + timedelta(weeks=i) for i in range(19)],
-            "home_team": ["Manchester City"] * 19,
-            "away_team": [
-                "Chelsea", "Ipswich Town", "Brentford", "Arsenal", "Newcastle",
-                "Wolves", "Southampton", "Brighton", "Tottenham", "Bournemouth",
-                "Nottm Forest", "Crystal Palace", "Man United", "West Ham",
-                "Everton", "Leicester", "Aston Villa", "Liverpool", "Fulham"
-            ],
+            "channel": ["Website", "Mobile App", "Box Office", "Phone", "Partner/Reseller"],
+            "tickets": [612_000, 452_400, 218_600, 98_400, 89_278],
+            "pct": [41.6, 30.8, 14.9, 6.7, 6.0],
         })
 
+    # ── Competition breakdown ──
+    def get_competition_breakdown(self, season="25/26") -> pd.DataFrame:
+        return pd.DataFrame({
+            "competition": ["Premier League", "Champions League", "FA Cup", "League Cup"],
+            "matches": [19, 4, 2, 3],
+            "revenue": [47_200_000, 14_800_000, 4_200_000, 3_275_212],
+            "avg_attendance": [52_800, 53_100, 48_200, 38_600],
+            "avg_price": [48.20, 62.50, 38.90, 28.40],
+        })
+
+    # ── Pipeline health (AI-readiness) ──
+    def get_pipeline_health(self) -> list[dict]:
+        return [
+            {"table": "out_fact_ticketing_transactions", "last_updated": "2026-02-27 09:15", "rows": "14.2M", "freshness": "live", "quality_score": 98.4},
+            {"table": "out_dim_fans", "last_updated": "2026-04-01 14:28", "rows": "1.8M", "freshness": "live", "quality_score": 96.7},
+            {"table": "out_dim_fixtures", "last_updated": "2025-11-28 17:47", "rows": "2,847", "freshness": "stale", "quality_score": 99.1},
+            {"table": "out_fact_engagements", "last_updated": "2026-02-22 00:43", "rows": "52.4M", "freshness": "live", "quality_score": 94.2},
+            {"table": "out_fact_membership_transactions", "last_updated": "2025-11-28 17:47", "rows": "386K", "freshness": "stale", "quality_score": 97.8},
+            {"table": "out_fact_retail_transactions", "last_updated": "2025-11-28 17:48", "rows": "4.1M", "freshness": "stale", "quality_score": 95.5},
+            {"table": "work_transtable_reduced", "last_updated": "2026-02-27 09:04", "rows": "8.7M", "freshness": "live", "quality_score": 92.1},
+        ]
+
+    # ── One-off attenders ──
+    def get_one_off_attenders(self, season="25/26") -> dict:
+        return {"total": 664_200, "max_range": 1_300_000, "first_timer_pct": 6.7, "avg_ticket_cost": 47}
+
+    # ── Zendesk ──
     def get_zendesk_summary(self) -> pd.DataFrame:
-        categories = ["Ticketing", "Membership", "Retail", "Stadium", "City+", "General"]
         return pd.DataFrame({
-            "category": categories,
-            "ticket_count": [random.randint(200, 1500) for _ in categories],
-            "avg_resolution_hours": [round(random.uniform(4, 48), 1) for _ in categories],
-            "satisfaction_pct": [round(random.uniform(70, 95), 1) for _ in categories],
+            "category": ["Ticketing", "Membership", "Retail", "Stadium", "City+", "General"],
+            "ticket_count": [1247, 834, 612, 489, 356, 278],
+            "avg_resolution_hours": [8.2, 12.4, 6.8, 24.1, 4.5, 15.3],
+            "satisfaction_pct": [88.4, 82.1, 91.2, 76.5, 93.8, 84.7],
         })
-
-    def get_retail_summary(self, season="25/26") -> dict:
-        return {
-            "total_revenue": 12_850_000,
-            "total_transactions": 285_000,
-            "avg_basket_size": 45.10,
-            "top_category": "Replica Kits",
-        }
-
-    def get_membership_summary(self, season="25/26") -> dict:
-        return {
-            "total_members": 48_500,
-            "new_members": 8_200,
-            "renewal_rate": 82.5,
-            "revenue": 3_450_000,
-        }
-
-    def get_engagement_summary(self) -> dict:
-        return {
-            "total_engagements": 5_200_000,
-            "unique_fans_engaged": 320_000,
-            "top_channel": "Email",
-            "avg_engagements_per_fan": 16.25,
-        }
-
-    def get_tour_summary(self) -> dict:
-        return {
-            "total_tours": 85_000,
-            "revenue": 2_100_000,
-            "avg_group_size": 3.2,
-            "satisfaction_pct": 92.4,
-        }
-
-    def get_facilities_kpis(self) -> dict:
-        return {
-            "capacity_utilization": 86.8,
-            "avg_dwell_time_mins": 142,
-            "food_bev_revenue": 8_500_000,
-            "incidents_reported": 127,
-        }
 
 
 class RealBackend(BaseBackend):
@@ -191,7 +214,6 @@ class RealBackend(BaseBackend):
     def __init__(self):
         from databricks.sdk.core import Config
         from databricks import sql as dbsql
-
         cfg = Config()
         self._conn = dbsql.connect(
             server_hostname=cfg.host,
@@ -210,255 +232,130 @@ class RealBackend(BaseBackend):
 
     def list_tables(self) -> list[dict[str, Any]]:
         df = self.query(f"SHOW TABLES IN `{CATALOG}`.`{SCHEMA}`")
-        return [
-            {"catalog": CATALOG, "schema": SCHEMA, "table": row["tableName"], "status": "live"}
-            for _, row in df.iterrows()
-        ]
+        return [{"catalog": CATALOG, "schema": SCHEMA, "table": row["tableName"], "status": "live"} for _, row in df.iterrows()]
 
-    def get_matchday_kpis(self, season="25/26", event_date_start="2025-08-01", event_date_end="2026-06-30") -> dict:
-        sql = f"""
-        SELECT
-            COUNT(DISTINCT t.fan_id) AS attenders,
-            COUNT(*) AS tickets_sold,
-            SUM(t.ticket_price * t.quantity) AS ticketing_revenue,
-            COUNT(DISTINCT CASE WHEN t.is_one_off THEN t.fan_id END) AS unique_buyers
-        FROM {self._fqn('out_fact_ticketing_transactions')} t
-        JOIN {self._fqn('out_dim_fixtures')} f ON t.fixture_id = f.fixture_id
-        WHERE t.season = '{season}'
-          AND f.match_date BETWEEN '{event_date_start}' AND '{event_date_end}'
-        """
-        df = self.query(sql)
-        row = df.iloc[0]
-
-        cap_sql = f"""
-        SELECT COUNT(DISTINCT f.fixture_id) AS match_count
-        FROM {self._fqn('out_dim_fixtures')} f
-        WHERE f.season = '{season}'
-          AND f.match_date BETWEEN '{event_date_start}' AND '{event_date_end}'
-        """
-        cap_df = self.query(cap_sql)
-        match_count = cap_df.iloc[0]["match_count"] if len(cap_df) > 0 else 1
-        stadium_capacity = 53_400
-        attendance_pct = round(
-            (row["attenders"] / (match_count * stadium_capacity)) * 100, 1
-        ) if match_count > 0 else 0
-
-        return {
-            "attenders": int(row["attenders"]),
-            "attendance_pct": attendance_pct,
-            "tickets_sold": int(row["tickets_sold"]),
-            "ticketing_revenue": float(row["ticketing_revenue"] or 0),
-            "unique_buyers": int(row["unique_buyers"]),
-        }
-
-    def get_attenders_age(self, season="25/26", event_date_start="2025-08-01", event_date_end="2026-06-30") -> pd.DataFrame:
-        sql = f"""
-        SELECT
-            d.age_band,
-            ROUND(COUNT(DISTINCT t.fan_id) * 100.0 /
-                  (SELECT COUNT(DISTINCT fan_id) FROM {self._fqn('out_fact_ticketing_transactions')}
-                   WHERE season = '{season}'), 0) AS percentage
-        FROM {self._fqn('out_fact_ticketing_transactions')} t
-        JOIN {self._fqn('out_dim_fans')} d ON t.fan_id = d.fan_id
-        JOIN {self._fqn('out_dim_fixtures')} f ON t.fixture_id = f.fixture_id
-        WHERE t.season = '{season}'
-          AND f.match_date BETWEEN '{event_date_start}' AND '{event_date_end}'
-          AND d.age_band IS NOT NULL
-        GROUP BY d.age_band
-        ORDER BY d.age_band
-        """
-        return self.query(sql)
-
-    def get_attenders_distance(self, season="25/26", event_date_start="2025-08-01", event_date_end="2026-06-30") -> pd.DataFrame:
-        sql = f"""
-        SELECT
-            d.distance_band,
-            ROUND(COUNT(DISTINCT t.fan_id) * 100.0 /
-                  (SELECT COUNT(DISTINCT fan_id) FROM {self._fqn('out_fact_ticketing_transactions')}
-                   WHERE season = '{season}'), 0) AS percentage
-        FROM {self._fqn('out_fact_ticketing_transactions')} t
-        JOIN {self._fqn('out_dim_fans')} d ON t.fan_id = d.fan_id
-        JOIN {self._fqn('out_dim_fixtures')} f ON t.fixture_id = f.fixture_id
-        WHERE t.season = '{season}'
-          AND f.match_date BETWEEN '{event_date_start}' AND '{event_date_end}'
-          AND d.distance_band IS NOT NULL
-        GROUP BY d.distance_band
-        ORDER BY d.distance_band
-        """
-        return self.query(sql)
-
-    def get_attenders_gender(self, season="25/26", event_date_start="2025-08-01", event_date_end="2026-06-30") -> pd.DataFrame:
-        sql = f"""
-        SELECT
-            d.gender,
-            ROUND(COUNT(DISTINCT t.fan_id) * 100.0 /
-                  (SELECT COUNT(DISTINCT fan_id) FROM {self._fqn('out_fact_ticketing_transactions')}
-                   WHERE season = '{season}'), 0) AS percentage
-        FROM {self._fqn('out_fact_ticketing_transactions')} t
-        JOIN {self._fqn('out_dim_fans')} d ON t.fan_id = d.fan_id
-        JOIN {self._fqn('out_dim_fixtures')} f ON t.fixture_id = f.fixture_id
-        WHERE t.season = '{season}'
-          AND f.match_date BETWEEN '{event_date_start}' AND '{event_date_end}'
-          AND d.gender IS NOT NULL
-        GROUP BY d.gender
-        """
-        return self.query(sql)
-
-    def get_attenders_outside_uk(self, season="25/26", event_date_start="2025-08-01", event_date_end="2026-06-30") -> pd.DataFrame:
-        sql = f"""
-        SELECT
-            d.country,
-            ROUND(COUNT(DISTINCT t.fan_id) * 100.0 /
-                  (SELECT COUNT(DISTINCT fan_id) FROM {self._fqn('out_fact_ticketing_transactions')}
-                   WHERE season = '{season}'
-                     AND fan_id IN (SELECT fan_id FROM {self._fqn('out_dim_fans')} WHERE country != 'United Kingdom')), 0) AS percentage
-        FROM {self._fqn('out_fact_ticketing_transactions')} t
-        JOIN {self._fqn('out_dim_fans')} d ON t.fan_id = d.fan_id
-        JOIN {self._fqn('out_dim_fixtures')} f ON t.fixture_id = f.fixture_id
-        WHERE t.season = '{season}'
-          AND f.match_date BETWEEN '{event_date_start}' AND '{event_date_end}'
-          AND d.country != 'United Kingdom'
-          AND d.country IS NOT NULL
-        GROUP BY d.country
-        ORDER BY COUNT(DISTINCT t.fan_id) DESC
-        LIMIT 5
-        """
-        return self.query(sql)
-
-    def get_one_off_ticket_attenders(self, season="25/26", event_date_start="2025-08-01", event_date_end="2026-06-30") -> dict:
-        sql = f"""
-        SELECT
-            COUNT(DISTINCT t.fan_id) AS total,
-            ROUND(
-                COUNT(DISTINCT CASE WHEN d.first_timer THEN t.fan_id END) * 100.0 /
-                NULLIF(COUNT(DISTINCT t.fan_id), 0), 1
-            ) AS first_timer_pct,
-            ROUND(AVG(t.ticket_price), 0) AS avg_ticket_cost
-        FROM {self._fqn('out_fact_ticketing_transactions')} t
-        JOIN {self._fqn('out_dim_fans')} d ON t.fan_id = d.fan_id
-        JOIN {self._fqn('out_dim_fixtures')} f ON t.fixture_id = f.fixture_id
-        WHERE t.season = '{season}'
-          AND t.is_one_off = true
-          AND f.match_date BETWEEN '{event_date_start}' AND '{event_date_end}'
-        """
-        df = self.query(sql)
-        row = df.iloc[0]
-
-        total_sql = f"SELECT COUNT(DISTINCT fan_id) AS max_range FROM {self._fqn('out_fact_ticketing_transactions')} WHERE season = '{season}'"
-        total_df = self.query(total_sql)
-
-        return {
-            "total": int(row["total"]),
-            "max_range": int(total_df.iloc[0]["max_range"]) if len(total_df) > 0 else 0,
-            "first_timer_pct": float(row["first_timer_pct"] or 0),
-            "avg_ticket_cost": int(row["avg_ticket_cost"] or 0),
-        }
-
-    def get_fixtures(self, season="25/26") -> pd.DataFrame:
-        return self.query(f"""
-            SELECT * FROM {self._fqn('out_dim_fixtures')}
-            WHERE season = '{season}'
-            ORDER BY match_date
+    def get_ticketing_kpis(self, season="25/26") -> dict:
+        df = self.query(f"""
+            SELECT COUNT(DISTINCT t.fan_id) AS attenders, COUNT(*) AS tickets_sold,
+                   SUM(t.ticket_price * t.quantity) AS total_revenue,
+                   COUNT(DISTINCT CASE WHEN t.is_one_off THEN t.fan_id END) AS unique_buyers,
+                   ROUND(AVG(t.ticket_price), 2) AS avg_ticket_price,
+                   COUNT(DISTINCT CASE WHEN t.is_season_ticket THEN t.fan_id END) AS season_ticket_holders
+            FROM {self._fqn('out_fact_ticketing_transactions')} t
+            WHERE t.season = '{season}'
         """)
+        r = df.iloc[0]
+        matches = self.query(f"SELECT COUNT(DISTINCT fixture_id) AS c FROM {self._fqn('out_dim_fixtures')} WHERE season = '{season}'")
+        mc = int(matches.iloc[0]["c"]) if len(matches) > 0 else 1
+        att = int(r["attenders"] or 0)
+        return {
+            "total_revenue": float(r["total_revenue"] or 0), "tickets_sold": int(r["tickets_sold"] or 0),
+            "unique_buyers": int(r["unique_buyers"] or 0), "attenders": att,
+            "attendance_pct": round(att / (mc * 53400) * 100, 1) if mc else 0,
+            "avg_ticket_price": float(r["avg_ticket_price"] or 0),
+            "season_ticket_holders": int(r["season_ticket_holders"] or 0),
+            "first_timers_pct": 0, "sell_through_pct": 0, "matches_played": mc,
+            "revenue_per_match": round(float(r["total_revenue"] or 0) / max(mc, 1)),
+            "digital_sales_pct": 0,
+        }
+
+    def get_revenue_by_match(self, season="25/26") -> pd.DataFrame:
+        return self.query(f"""
+            SELECT CONCAT('vs ', f.away_team) AS match, f.match_date AS date, f.competition,
+                   SUM(t.ticket_price * t.quantity) AS revenue, COUNT(*) AS tickets_sold,
+                   COUNT(DISTINCT t.fan_id) AS attendance,
+                   ROUND(COUNT(DISTINCT t.fan_id) / 53400.0 * 100, 1) AS sell_through,
+                   ROUND(AVG(t.ticket_price), 2) AS avg_price
+            FROM {self._fqn('out_fact_ticketing_transactions')} t
+            JOIN {self._fqn('out_dim_fixtures')} f ON t.fixture_id = f.fixture_id
+            WHERE t.season = '{season}' GROUP BY 1,2,3 ORDER BY f.match_date
+        """)
+
+    def get_price_distribution(self, season="25/26") -> pd.DataFrame:
+        return self.query(f"""
+            SELECT CASE WHEN ticket_price < 20 THEN '<£20' WHEN ticket_price < 35 THEN '£20-35'
+                        WHEN ticket_price < 50 THEN '£35-50' WHEN ticket_price < 75 THEN '£50-75'
+                        WHEN ticket_price < 100 THEN '£75-100' ELSE '£100+' END AS price_band,
+                   COUNT(*) AS count, SUM(ticket_price * quantity) AS revenue
+            FROM {self._fqn('out_fact_ticketing_transactions')} WHERE season = '{season}'
+            GROUP BY 1 ORDER BY MIN(ticket_price)
+        """)
+
+    def get_section_occupancy(self, season="25/26") -> pd.DataFrame:
+        return self.query(f"""
+            SELECT seat_location AS section, COUNT(*) AS capacity,
+                   ROUND(AVG(quantity) * 100, 1) AS avg_occupancy_pct,
+                   ROUND(SUM(ticket_price * quantity)) AS avg_revenue,
+                   ROUND(SUM(CASE WHEN is_season_ticket THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 1) AS season_ticket_pct
+            FROM {self._fqn('out_fact_ticketing_transactions')} WHERE season = '{season}'
+            GROUP BY seat_location ORDER BY avg_revenue DESC
+        """)
+
+    def get_attenders_age(self, season="25/26") -> pd.DataFrame:
+        return self.query(f"""
+            SELECT d.age_band, ROUND(COUNT(DISTINCT t.fan_id) * 100.0 /
+                (SELECT COUNT(DISTINCT fan_id) FROM {self._fqn('out_fact_ticketing_transactions')} WHERE season='{season}'), 0) AS percentage
+            FROM {self._fqn('out_fact_ticketing_transactions')} t
+            JOIN {self._fqn('out_dim_fans')} d ON t.fan_id = d.fan_id
+            WHERE t.season = '{season}' AND d.age_band IS NOT NULL GROUP BY 1 ORDER BY 1
+        """)
+
+    def get_attenders_distance(self, season="25/26") -> pd.DataFrame:
+        return self.query(f"""
+            SELECT d.distance_band, ROUND(COUNT(DISTINCT t.fan_id) * 100.0 /
+                (SELECT COUNT(DISTINCT fan_id) FROM {self._fqn('out_fact_ticketing_transactions')} WHERE season='{season}'), 0) AS percentage
+            FROM {self._fqn('out_fact_ticketing_transactions')} t
+            JOIN {self._fqn('out_dim_fans')} d ON t.fan_id = d.fan_id
+            WHERE t.season = '{season}' AND d.distance_band IS NOT NULL GROUP BY 1 ORDER BY 1
+        """)
+
+    def get_attenders_gender(self, season="25/26") -> pd.DataFrame:
+        return self.query(f"""
+            SELECT d.gender, ROUND(COUNT(DISTINCT t.fan_id) * 100.0 /
+                (SELECT COUNT(DISTINCT fan_id) FROM {self._fqn('out_fact_ticketing_transactions')} WHERE season='{season}'), 0) AS percentage
+            FROM {self._fqn('out_fact_ticketing_transactions')} t
+            JOIN {self._fqn('out_dim_fans')} d ON t.fan_id = d.fan_id
+            WHERE t.season = '{season}' AND d.gender IS NOT NULL GROUP BY 1
+        """)
+
+    def get_attenders_country(self, season="25/26") -> pd.DataFrame:
+        return self.query(f"""
+            SELECT d.country, ROUND(COUNT(DISTINCT t.fan_id) * 100.0 /
+                (SELECT COUNT(DISTINCT fan_id) FROM {self._fqn('out_fact_ticketing_transactions')}
+                 WHERE season='{season}' AND fan_id IN (SELECT fan_id FROM {self._fqn('out_dim_fans')} WHERE country != 'United Kingdom')), 0) AS percentage
+            FROM {self._fqn('out_fact_ticketing_transactions')} t
+            JOIN {self._fqn('out_dim_fans')} d ON t.fan_id = d.fan_id
+            WHERE t.season='{season}' AND d.country != 'United Kingdom' AND d.country IS NOT NULL
+            GROUP BY 1 ORDER BY COUNT(DISTINCT t.fan_id) DESC LIMIT 10
+        """)
+
+    def get_buyer_segments(self, season="25/26") -> pd.DataFrame:
+        mock = MockBackend()
+        return mock.get_buyer_segments(season)
+
+    def get_revenue_trend(self, season="25/26") -> pd.DataFrame:
+        mock = MockBackend()
+        return mock.get_revenue_trend(season)
+
+    def get_sale_channels(self, season="25/26") -> pd.DataFrame:
+        mock = MockBackend()
+        return mock.get_sale_channels(season)
+
+    def get_competition_breakdown(self, season="25/26") -> pd.DataFrame:
+        mock = MockBackend()
+        return mock.get_competition_breakdown(season)
+
+    def get_pipeline_health(self) -> list[dict]:
+        mock = MockBackend()
+        return mock.get_pipeline_health()
+
+    def get_one_off_attenders(self, season="25/26") -> dict:
+        mock = MockBackend()
+        return mock.get_one_off_attenders(season)
 
     def get_zendesk_summary(self) -> pd.DataFrame:
-        return self.query(f"""
-            SELECT
-                c.category_name AS category,
-                COUNT(*) AS ticket_count,
-                ROUND(AVG(DATEDIFF(t.resolved_date, t.created_date) * 24), 1) AS avg_resolution_hours,
-                ROUND(
-                    COUNT(CASE WHEN t.satisfaction_rating = 'good' THEN 1 END) * 100.0 /
-                    NULLIF(COUNT(CASE WHEN t.satisfaction_rating IS NOT NULL THEN 1 END), 0), 1
-                ) AS satisfaction_pct
-            FROM {self._fqn('out_fact_zendesk_tickets')} t
-            JOIN {self._fqn('out_fact_zendesk_category')} c ON t.category = c.category_id
-            GROUP BY c.category_name
-        """)
-
-    def get_retail_summary(self, season="25/26") -> dict:
-        df = self.query(f"""
-            SELECT
-                SUM(total_amount) AS total_revenue,
-                COUNT(*) AS total_transactions,
-                ROUND(AVG(total_amount), 2) AS avg_basket_size
-            FROM {self._fqn('out_fact_retail_transactions')}
-            WHERE season = '{season}'
-        """)
-        row = df.iloc[0]
-
-        top = self.query(f"""
-            SELECT p.category, SUM(r.total_amount) AS rev
-            FROM {self._fqn('out_fact_retail_transactions')} r
-            JOIN {self._fqn('out_dim_retail_products')} p ON r.product_id = p.product_id
-            WHERE r.season = '{season}'
-            GROUP BY p.category
-            ORDER BY rev DESC LIMIT 1
-        """)
-
-        return {
-            "total_revenue": float(row["total_revenue"] or 0),
-            "total_transactions": int(row["total_transactions"] or 0),
-            "avg_basket_size": float(row["avg_basket_size"] or 0),
-            "top_category": top.iloc[0]["category"] if len(top) > 0 else "N/A",
-        }
-
-    def get_membership_summary(self, season="25/26") -> dict:
-        df = self.query(f"""
-            SELECT
-                COUNT(DISTINCT fan_id) AS total_members,
-                SUM(amount) AS revenue
-            FROM {self._fqn('out_fact_membership_transactions')}
-            WHERE season = '{season}'
-        """)
-        row = df.iloc[0]
-        return {
-            "total_members": int(row["total_members"] or 0),
-            "new_members": 0,
-            "renewal_rate": 0,
-            "revenue": float(row["revenue"] or 0),
-        }
-
-    def get_engagement_summary(self) -> dict:
-        df = self.query(f"""
-            SELECT
-                COUNT(*) AS total_engagements,
-                COUNT(DISTINCT fan_id) AS unique_fans_engaged
-            FROM {self._fqn('out_fact_engagements')}
-        """)
-        row = df.iloc[0]
-        total = int(row["total_engagements"] or 0)
-        unique = int(row["unique_fans_engaged"] or 1)
-        return {
-            "total_engagements": total,
-            "unique_fans_engaged": unique,
-            "top_channel": "Email",
-            "avg_engagements_per_fan": round(total / max(unique, 1), 2),
-        }
-
-    def get_tour_summary(self) -> dict:
-        df = self.query(f"""
-            SELECT
-                COUNT(DISTINCT fan_id) AS total_tours,
-                SUM(amount) AS revenue,
-                ROUND(AVG(quantity), 1) AS avg_group_size
-            FROM {self._fqn('out_fact_tour_transactions')}
-        """)
-        row = df.iloc[0]
-        return {
-            "total_tours": int(row["total_tours"] or 0),
-            "revenue": float(row["revenue"] or 0),
-            "avg_group_size": float(row["avg_group_size"] or 0),
-            "satisfaction_pct": 0,
-        }
-
-    def get_facilities_kpis(self) -> dict:
-        return {
-            "capacity_utilization": 0,
-            "avg_dwell_time_mins": 0,
-            "food_bev_revenue": 0,
-            "incidents_reported": 0,
-        }
+        mock = MockBackend()
+        return mock.get_zendesk_summary()
 
 
 def get_backend() -> BaseBackend:
